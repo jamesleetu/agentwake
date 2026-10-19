@@ -1,0 +1,24 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: swift build -c release
+      - name: Smoke test
+        run: |
+          B=.build/release/agentwake
+          $B --version
+          AGENTWAKE_MIN_NOTIFY=999 $B run -- true
+          export CLAUDE_CONFIG_DIR="$RUNNER_TEMP/claude"
+          $B install-hooks
+          test "$(grep -c 'agentwake' "$CLAUDE_CONFIG_DIR/settings.json")" -ge 4
+          $B uninstall-hooks
+          ! grep -q 'agentwake' "$CLAUDE_CONFIG_DIR/settings.json"
