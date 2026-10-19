@@ -1,0 +1,57 @@
+name: Release
+
+# Builds a universal binary and publishes it as an "all" Homebrew bottle, so
+# `brew install` pours it directly instead of building (which needs current Command Line Tools).
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to release (e.g. v0.1.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-latest
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+
+      - name: Build universal binary
+        run: |
+          swift build -c release --arch arm64 --arch x86_64
+          BIN="$(swift build -c release --arch arm64 --arch x86_64 --show-bin-path)/agentwake"
+          lipo -archs "$BIN"
+          codesign --force --sign - "$BIN"
+          "$BIN" --version
+          echo "BIN=$BIN" >> "$GITHUB_ENV"
+
+      - name: Package bottle
+        run: |
+          VERSION="${TAG#v}"
+          ROOT="bottle/agentwake/$VERSION"
+          mkdir -p "$ROOT/bin"
+          cp "$BIN" "$ROOT/bin/agentwake"
+          cp LICENSE README.md "$ROOT/"
+          # Non-ghcr root_url bottles are fetched as <name>-<version>.<tag>.bottle.tar.gz
+          FILE="agentwake-$VERSION.all.bottle.tar.gz"
+          tar -czf "$FILE" -C bottle agentwake
+          SHA=$(shasum -a 256 "$FILE" | cut -d' ' -f1)
+          echo "FILE=$FILE" >> "$GITHUB_ENV"
+          echo "SHA=$SHA" >> "$GITHUB_ENV"
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$TAG" >/dev/null 2>&1 \
+            && gh release upload "$TAG" "$FILE" --clobber \
+            || gh release create "$TAG" "$FILE" --title "agentwake $TAG" --notes "Bottle sha256 (all): \`$SHA\`"
+          echo "Bottle sha256: \`$SHA\`" >> "$GITHUB_STEP_SUMMARY"
