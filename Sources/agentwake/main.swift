@@ -2,7 +2,7 @@ import Darwin
 import Foundation
 import IOKit.pwr_mgt
 
-let version = "0.1.1"
+let version = "0.1.2"
 
 // MARK: - Paths & config
 
@@ -25,7 +25,19 @@ struct HoldState: Codable {
     var holderPid: Int32
     var targetPid: Int32
     var startedAt: Date
+    /// awakeSeconds() at start; nil in state files written by 0.1.1 and earlier.
+    var startedAwake: Double?
     var label: String
+
+    var elapsedAwake: TimeInterval {
+        startedAwake.map { awakeSeconds() - $0 } ?? Date().timeIntervalSince(startedAt)
+    }
+}
+
+/// System-wide seconds spent awake. Unlike wall-clock time it stops while the Mac sleeps,
+/// so "done in N minutes" reports actual working time, not time spent with the lid closed.
+func awakeSeconds() -> Double {
+    Double(clock_gettime_nsec_np(CLOCK_UPTIME_RAW)) / 1e9
 }
 
 func stateURL(_ key: String) -> URL {
@@ -172,7 +184,7 @@ func spawnDetachedHolder(_ args: [String]) -> Int32? {
 /// Holds the assertion until SIGTERM, the target process exits (kqueue), or the timeout.
 func runHolder(key: String, targetPid: Int32, label: String) -> Never {
     guard let assertion = createAssertion(label) else { exit(1) }
-    writeState(HoldState(holderPid: getpid(), targetPid: targetPid, startedAt: Date(), label: label), key: key)
+    writeState(HoldState(holderPid: getpid(), targetPid: targetPid, startedAt: Date(), startedAwake: awakeSeconds(), label: label), key: key)
 
     func finish() -> Never {
         IOPMAssertionRelease(assertion)
@@ -215,7 +227,7 @@ func hookCommand(_ action: String) {
     case "stop":
         guard let state = existing else { return }
         kill(state.holderPid, SIGTERM)
-        let elapsed = Date().timeIntervalSince(state.startedAt)
+        let elapsed = state.elapsedAwake
         if elapsed >= minNotifySeconds {
             let failed = (json["hook_event_name"] as? String) == "StopFailure"
             notify(title: failed ? t("⚠️ Claude 작업 실패", "⚠️ Claude task failed") : t("✅ Claude 작업 완료", "✅ Claude task done"),
@@ -231,7 +243,7 @@ func runCommand(_ args: [String]) -> Never {
     guard !args.isEmpty else { usage() }
     let label = args.joined(separator: " ")
     let assertion = createAssertion(label)
-    let start = Date()
+    let start = awakeSeconds()
 
     let path = args[0].contains("/") ? args[0] : findExecutable(args[0]) ?? args[0]
     guard let pid = spawn(path, Array(args.dropFirst())) else {
@@ -244,7 +256,7 @@ func runCommand(_ args: [String]) -> Never {
     let code = waitExitCode(pid)
     if let assertion { IOPMAssertionRelease(assertion) }
 
-    let elapsed = Date().timeIntervalSince(start)
+    let elapsed = awakeSeconds() - start
     if elapsed >= minNotifySeconds {
         notify(title: code == 0 ? t("✅ 완료", "✅ Done") : t("❌ 실패 (exit \(code))", "❌ Failed (exit \(code))"),
                message: "\(label) · \(formatDuration(elapsed))")
@@ -260,13 +272,13 @@ func waitCommand(_ pidString: String) -> Never {
     }
     let name = processName(pid)
     let assertion = createAssertion("pid \(pid) \(name)")
-    let start = Date()
+    let start = awakeSeconds()
     print(t("⏳ \(name) (pid \(pid)) 종료까지 잠자기 방지 중…", "⏳ Keeping awake until \(name) (pid \(pid)) exits…"))
 
     let source = DispatchSource.makeProcessSource(identifier: pid, eventMask: .exit, queue: .main)
     source.setEventHandler {
         if let assertion { IOPMAssertionRelease(assertion) }
-        notify(title: t("✅ 프로세스 종료", "✅ Process exited"), message: "\(name) · \(formatDuration(Date().timeIntervalSince(start)))")
+        notify(title: t("✅ 프로세스 종료", "✅ Process exited"), message: "\(name) · \(formatDuration(awakeSeconds() - start))")
         exit(0)
     }
     source.resume()
@@ -283,7 +295,7 @@ func statusCommand() {
             continue
         }
         active += 1
-        let elapsed = formatDuration(Date().timeIntervalSince(s.startedAt))
+        let elapsed = formatDuration(s.elapsedAwake)
         print(t("☕️ \(s.label)  ·  \(elapsed) 경과  ·  claude pid \(s.targetPid)",
                 "☕️ \(s.label)  ·  \(elapsed) elapsed  ·  claude pid \(s.targetPid)"))
     }
