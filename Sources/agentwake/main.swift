@@ -2,7 +2,7 @@ import Darwin
 import Foundation
 import IOKit.pwr_mgt
 
-let version = "0.1.0"
+let version = "0.1.1"
 
 // MARK: - Paths & config
 
@@ -103,14 +103,37 @@ func findExecutable(_ name: String) -> String? {
     return paths.map { "\($0)/\(name)" }.first { FileManager.default.isExecutableFile(atPath: $0) }
 }
 
+// MARK: - Spawning
+// Foundation's Process passes arguments through fileSystemRepresentation, which decomposes
+// Korean (and other) text to NFD. Spawning directly hands children their arguments byte-for-byte.
+
+func spawn(_ path: String, _ args: [String], nullFDs: [Int32] = [], newSession: Bool = false) -> pid_t? {
+    var attr: posix_spawnattr_t?
+    posix_spawnattr_init(&attr)
+    defer { posix_spawnattr_destroy(&attr) }
+    if newSession { posix_spawnattr_setflags(&attr, Int16(POSIX_SPAWN_SETSID)) }
+    var actions: posix_spawn_file_actions_t?
+    posix_spawn_file_actions_init(&actions)
+    defer { posix_spawn_file_actions_destroy(&actions) }
+    for fd in nullFDs {
+        posix_spawn_file_actions_addopen(&actions, fd, "/dev/null", fd == 0 ? O_RDONLY : O_WRONLY, 0)
+    }
+    let argv = ([path] + args).map { strdup($0) } + [nil]
+    defer { argv.forEach { free($0) } }
+    var pid: pid_t = 0
+    return posix_spawn(&pid, path, &actions, &attr, argv, environ) == 0 ? pid : nil
+}
+
+/// Exit code like a shell reports it: the status, or 128 + signal number.
+func waitExitCode(_ pid: pid_t) -> Int32 {
+    var status: Int32 = 0
+    while waitpid(pid, &status, 0) == -1 && errno == EINTR {}
+    let signal = status & 0x7f
+    return signal == 0 ? (status >> 8) & 0xff : 128 + signal
+}
+
 func runQuietly(_ path: String, _ args: [String]) {
-    let p = Process()
-    p.executableURL = URL(fileURLWithPath: path)
-    p.arguments = args
-    p.standardOutput = FileHandle.nullDevice
-    p.standardError = FileHandle.nullDevice
-    try? p.run()
-    p.waitUntilExit()
+    if let pid = spawn(path, args, nullFDs: [1, 2]) { _ = waitExitCode(pid) }
 }
 
 func notify(title: String, message: String) {
@@ -143,21 +166,7 @@ func notify(title: String, message: String) {
 /// so Claude Code doesn't wait on it and it survives the hook's exit.
 func spawnDetachedHolder(_ args: [String]) -> Int32? {
     let exe = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath().path
-    var attr: posix_spawnattr_t?
-    posix_spawnattr_init(&attr)
-    posix_spawnattr_setflags(&attr, Int16(POSIX_SPAWN_SETSID))
-    var actions: posix_spawn_file_actions_t?
-    posix_spawn_file_actions_init(&actions)
-    for fd in [0, 1, 2] {
-        posix_spawn_file_actions_addopen(&actions, Int32(fd), "/dev/null", fd == 0 ? O_RDONLY : O_WRONLY, 0)
-    }
-    let argv = ([exe] + args).map { strdup($0) } + [nil]
-    defer { argv.forEach { free($0) } }
-    var pid: pid_t = 0
-    let rc = posix_spawn(&pid, exe, &actions, &attr, argv, environ)
-    posix_spawn_file_actions_destroy(&actions)
-    posix_spawnattr_destroy(&attr)
-    return rc == 0 ? pid : nil
+    return spawn(exe, args, nullFDs: [0, 1, 2], newSession: true)
 }
 
 /// Holds the assertion until SIGTERM, the target process exits (kqueue), or the timeout.
@@ -224,20 +233,18 @@ func runCommand(_ args: [String]) -> Never {
     let assertion = createAssertion(label)
     let start = Date()
 
-    let p = Process()
-    p.executableURL = URL(fileURLWithPath: findExecutable(args[0]) ?? args[0])
-    p.arguments = Array(args.dropFirst())
-    // Ctrl-C reaches the child via the shared process group; just don't die before it does.
-    signal(SIGINT, SIG_IGN)
-    do { try p.run() } catch {
-        fputs(t("agentwake: \(args[0]) 실행 실패: ", "agentwake: failed to run \(args[0]): ") + error.localizedDescription + "\n", stderr)
+    let path = args[0].contains("/") ? args[0] : findExecutable(args[0]) ?? args[0]
+    guard let pid = spawn(path, Array(args.dropFirst())) else {
+        fputs(t("agentwake: \(args[0]) 실행 실패: ", "agentwake: failed to run \(args[0]): ") + String(cString: strerror(errno)) + "\n", stderr)
         exit(127)
     }
-    p.waitUntilExit()
+    // Ctrl-C reaches the child via the shared process group; just don't die before it does.
+    // Ignored after spawning so the child keeps the default SIGINT handling.
+    signal(SIGINT, SIG_IGN)
+    let code = waitExitCode(pid)
     if let assertion { IOPMAssertionRelease(assertion) }
 
     let elapsed = Date().timeIntervalSince(start)
-    let code = p.terminationStatus
     if elapsed >= minNotifySeconds {
         notify(title: code == 0 ? t("✅ 완료", "✅ Done") : t("❌ 실패 (exit \(code))", "❌ Failed (exit \(code))"),
                message: "\(label) · \(formatDuration(elapsed))")
