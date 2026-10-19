@@ -3,13 +3,13 @@
 class Agentwake < Formula
   desc "Keep your Mac awake while Claude Code and long commands are running"
   homepage "https://github.com/jamesleetu/agentwake"
-  url "https://github.com/jamesleetu/agentwake/archive/refs/tags/v0.1.1.tar.gz"
-  sha256 "19e963db42c59c6a0f51a4658cc1738539f94c3584d676b554290c5344113e91"
+  url "https://github.com/jamesleetu/agentwake/archive/refs/tags/v0.1.2.tar.gz"
+  sha256 "277e9b958329fd8bbe9aa76e77be385854b580605bb52a8b09be1875d66dbc7e"
   license "MIT"
 
   bottle do
-    root_url "https://github.com/jamesleetu/agentwake/releases/download/v0.1.1"
-    sha256 cellar: :any_skip_relocation, all: "56a324cfdc1d3693a7d907994124fd8f1cada3e57af540aec73ea85fbd42e248"
+    root_url "https://github.com/jamesleetu/agentwake/releases/download/v0.1.2"
+    sha256 cellar: :any_skip_relocation, all: "9fe08fba0bbe4387cb2374e0df5633af5aed6021a66c83d720658d781e7c6823"
   end
 
   depends_on xcode: ["15.0", :build]
